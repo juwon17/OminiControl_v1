@@ -59,7 +59,7 @@ class Condition(object):
             return condition_img
         elif condition_type == "canny":
             img = np.array(raw_img)
-            edges = cv2.Canny(img, 100, 200)
+            edges = cv2.Canny(img, 60, 120) # FIXME: gap between training and testing for canny edge
             edges = Image.fromarray(edges).convert("RGB")
             return edges
         elif condition_type == "subject":

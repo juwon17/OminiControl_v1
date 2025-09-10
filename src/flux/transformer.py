@@ -7,12 +7,12 @@ from diffusers.models.transformers.transformer_flux import (
     FluxTransformer2DModel,
     Transformer2DModelOutput,
     USE_PEFT_BACKEND,
-    is_torch_version,
     scale_lora_layers,
     unscale_lora_layers,
     logger,
 )
 import numpy as np
+from diffusers.utils import is_torch_version
 
 
 def prepare_params(

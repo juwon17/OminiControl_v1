@@ -4,123 +4,55 @@ import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 import random
+import os
+import glob
 
-
-class Subject200KDateset(Dataset):
+class CustomDataset(Dataset):
     def __init__(
         self,
-        base_dataset,
-        condition_size: int = 512,
-        target_size: int = 512,
-        image_size: int = 512,
-        padding: int = 0,
-        condition_type: str = "subject",
+        image_folder: str,
+        prompt: str,
         drop_text_prob: float = 0.1,
         drop_image_prob: float = 0.1,
         return_pil_image: bool = False,
-    ):
-        self.base_dataset = base_dataset
-        self.condition_size = condition_size
-        self.target_size = target_size
-        self.image_size = image_size
-        self.padding = padding
-        self.condition_type = condition_type
-        self.drop_text_prob = drop_text_prob
-        self.drop_image_prob = drop_image_prob
-        self.return_pil_image = return_pil_image
-
-        self.to_tensor = T.ToTensor()
-
-    def __len__(self):
-        return len(self.base_dataset) * 2
-
-    def __getitem__(self, idx):
-        # If target is 0, left image is target, right image is condition
-        target = idx % 2
-        item = self.base_dataset[idx // 2]
-
-        # Crop the image to target and condition
-        image = item["image"]
-        left_img = image.crop(
-            (
-                self.padding,
-                self.padding,
-                self.image_size + self.padding,
-                self.image_size + self.padding,
-            )
-        )
-        right_img = image.crop(
-            (
-                self.image_size + self.padding * 2,
-                self.padding,
-                self.image_size * 2 + self.padding * 2,
-                self.image_size + self.padding,
-            )
-        )
-
-        # Get the target and condition image
-        target_image, condition_img = (
-            (left_img, right_img) if target == 0 else (right_img, left_img)
-        )
-
-        # Resize the image
-        condition_img = condition_img.resize(
-            (self.condition_size, self.condition_size)
-        ).convert("RGB")
-        target_image = target_image.resize(
-            (self.target_size, self.target_size)
-        ).convert("RGB")
-
-        # Get the description
-        description = item["description"][
-            "description_0" if target == 0 else "description_1"
-        ]
-
-        # Randomly drop text or image
-        drop_text = random.random() < self.drop_text_prob
-        drop_image = random.random() < self.drop_image_prob
-        if drop_text:
-            description = ""
-        if drop_image:
-            condition_img = Image.new(
-                "RGB", (self.condition_size, self.condition_size), (0, 0, 0)
-            )
-
-        return {
-            "image": self.to_tensor(target_image),
-            "condition": self.to_tensor(condition_img),
-            "condition_type": self.condition_type,
-            "description": description,
-            # 16 is the downscale factor of the image
-            "position_delta": np.array([0, -self.condition_size // 16]),
-            **({"pil_image": image} if self.return_pil_image else {}),
-        }
-
-
-class ImageConditionDataset(Dataset):
-    def __init__(
-        self,
-        base_dataset,
-        condition_size: int = 512,
-        target_size: int = 512,
         condition_type: str = "canny",
-        drop_text_prob: float = 0.1,
-        drop_image_prob: float = 0.1,
-        return_pil_image: bool = False,
+        prompt_folder: str = None,
+        target_width: int = None,
+        target_height: int = None,
+        condition_folder: str = None,
     ):
-        self.base_dataset = base_dataset
-        self.condition_size = condition_size
-        self.target_size = target_size
-        self.condition_type = condition_type
+        self.image_folder = image_folder
+        self.prompt = prompt
         self.drop_text_prob = drop_text_prob
         self.drop_image_prob = drop_image_prob
         self.return_pil_image = return_pil_image
+        self.condition_type = condition_type
+        self.prompt_folder = prompt_folder
+        self.target_width = target_width
+        self.target_height = target_height
+        self.condition_folder = condition_folder
 
+        # Get all image files from the folder
+        self.image_files = []
+        if image_folder.endswith(".txt"):
+            with open(image_folder, 'r') as f:
+                for line in f:
+                    self.image_files.append(line.strip())
+            random.shuffle(self.image_files)
+        else:
+            for ext in ['*.jpg', '*.jpeg', '*.png']:
+                self.image_files.extend(glob.glob(os.path.join(image_folder, ext)))
+        
         self.to_tensor = T.ToTensor()
 
-    def __len__(self):
-        return len(self.base_dataset)
+        if self.condition_folder is None:
+            print("Warning: No condition folder provided. Using condition type to generate condition image.")
+        if self.prompt_folder is None:
+            print("Warning: No prompt folder provided. Using default prompt for all images: "+ self.prompt) 
 
+    def __len__(self):
+        return len(self.image_files)
+    
     @property
     def depth_pipe(self):
         if not hasattr(self, "_depth_pipe"):
@@ -134,67 +66,63 @@ class ImageConditionDataset(Dataset):
         return self._depth_pipe
 
     def _get_canny_edge(self, img):
-        resize_ratio = self.condition_size / max(img.size)
-        img = img.resize(
-            (int(img.size[0] * resize_ratio), int(img.size[1] * resize_ratio))
-        )
         img_np = np.array(img)
         img_gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(img_gray, 100, 200)
-        return Image.fromarray(edges).convert("RGB")
+        thres1= random.randint(30, 90)
+        thres2 = random.randint(60, 150)
+        low_threshold = min(thres1, thres2)
+        high_threshold = max(thres1, thres2)
+        edges = cv2.Canny(img_gray, low_threshold, high_threshold)
 
+        return Image.fromarray(edges).convert("RGB")
+    
     def __getitem__(self, idx):
-        image = self.base_dataset[idx]["jpg"]
-        image = image.resize((self.target_size, self.target_size)).convert("RGB")
-        description = self.base_dataset[idx]["json"]["prompt"]
+        # Load image from file
+        image_path = self.image_files[idx]
+        image = Image.open(image_path).convert("RGB")
+
+        # Get condition image from condition folder or generate it from condition type
+        if self.condition_folder is not None:
+            condition_path = os.path.join(self.condition_folder, os.path.basename(image_path))
+            condition_img = Image.open(condition_path).convert("RGB")
+        else:
+            if self.condition_type == "canny":
+                condition_img = self._get_canny_edge(image)
+            elif self.condition_type == "depth":
+                condition_img = self.depth_pipe(image)["depth"].convert("RGB")
+            else:
+                raise ValueError(f"Invalid condition type: {self.condition_type}")
+
+        # check condition_image and image is same size
+        if condition_img.size != image.size:
+            raise ValueError(f"Condition image and image are not the same size: {condition_img.size} != {image.size}")
+
+        # if condition_img is smaller than target_size, resize it wrt original aspect ratio
+        if condition_img.size[0] < self.target_width or condition_img.size[1] < self.target_height:
+            if condition_img.size[0] < condition_img.size[1]:
+                image = image.resize((self.target_width, self.target_height * int(image.size[1] / image.size[0])))
+                condition_img = condition_img.resize((self.target_width, self.target_height * int(condition_img.size[1] / condition_img.size[0])))
+            else:
+                image = image.resize((self.target_width * int(image.size[0] / image.size[1]), self.target_height))
+                condition_img = condition_img.resize((self.target_width * int(condition_img.size[0] / condition_img.size[1]), self.target_height))
+
+        #random crop image and condition_img to target_size
+        x1, y1 = random.randint(0, image.size[0] - self.target_width), random.randint(0, image.size[1] - self.target_height)
+        x2, y2 = x1 + self.target_width, y1 + self.target_height
+        
+        image = image.crop((x1, y1, x2, y2))
+        condition_img = condition_img.crop((x1, y1, x2, y2))
+
+        # Get prompt from prompt folder or use default prompt
+        if self.prompt_folder is not None:
+            prompt_path = os.path.join(self.prompt_folder, os.path.basename(image_path).replace(".png", ".txt").replace(".jpg", ".txt").replace(".jpeg", ".txt"))
+            with open(prompt_path, 'r') as f:
+                description = f.read()
+        else:
+            description = self.prompt
 
         # Get the condition image
         position_delta = np.array([0, 0])
-        if self.condition_type == "canny":
-            condition_img = self._get_canny_edge(image)
-        elif self.condition_type == "coloring":
-            condition_img = (
-                image.resize((self.condition_size, self.condition_size))
-                .convert("L")
-                .convert("RGB")
-            )
-        elif self.condition_type == "deblurring":
-            blur_radius = random.randint(1, 10)
-            condition_img = (
-                image.convert("RGB")
-                .resize((self.condition_size, self.condition_size))
-                .filter(ImageFilter.GaussianBlur(blur_radius))
-                .convert("RGB")
-            )
-        elif self.condition_type == "depth":
-            condition_img = self.depth_pipe(image)["depth"].convert("RGB")
-        elif self.condition_type == "depth_pred":
-            condition_img = image
-            image = self.depth_pipe(condition_img)["depth"].convert("RGB")
-            description = f"[depth] {description}"
-        elif self.condition_type == "fill":
-            condition_img = image.resize(
-                (self.condition_size, self.condition_size)
-            ).convert("RGB")
-            w, h = image.size
-            x1, x2 = sorted([random.randint(0, w), random.randint(0, w)])
-            y1, y2 = sorted([random.randint(0, h), random.randint(0, h)])
-            mask = Image.new("L", image.size, 0)
-            draw = ImageDraw.Draw(mask)
-            draw.rectangle([x1, y1, x2, y2], fill=255)
-            if random.random() > 0.5:
-                mask = Image.eval(mask, lambda a: 255 - a)
-            condition_img = Image.composite(
-                image, Image.new("RGB", image.size, (0, 0, 0)), mask
-            )
-        elif self.condition_type == "sr":
-            condition_img = image.resize(
-                (self.condition_size, self.condition_size)
-            ).convert("RGB")
-            position_delta = np.array([0, -self.condition_size // 16])
-
-        else:
-            raise ValueError(f"Condition type {self.condition_type} not implemented")
 
         # Randomly drop text or image
         drop_text = random.random() < self.drop_text_prob
@@ -203,7 +131,7 @@ class ImageConditionDataset(Dataset):
             description = ""
         if drop_image:
             condition_img = Image.new(
-                "RGB", (self.condition_size, self.condition_size), (0, 0, 0)
+                "RGB", (image.size), (0, 0, 0)
             )
 
         return {

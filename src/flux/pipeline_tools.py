@@ -29,6 +29,42 @@ def encode_images(pipeline: FluxPipeline, images: Tensor):
         )
     return images_tokens, images_ids
 
+"""
+def encode_images_2x_test(pipeline: FluxPipeline, images: Tensor):
+
+    ori_w, ori_h = images.size
+    images = images.resize((ori_w * 2, ori_h * 2))
+
+    images = pipeline.image_processor.preprocess(images)
+    images = images.to(pipeline.device).to(pipeline.dtype)
+    images = pipeline.vae.encode(images).latent_dist.sample()
+    images = (
+        images - pipeline.vae.config.shift_factor
+    ) * pipeline.vae.config.scaling_factor
+
+
+    from torch.nn.functional import interpolate
+    w, h = images.shape[2], images.shape[3]
+    images = interpolate(images, size=(w//2, h//2), mode="bilinear")
+
+    images_tokens = pipeline._pack_latents(images, *images.shape)
+    images_ids = pipeline._prepare_latent_image_ids(
+        images.shape[0],
+        images.shape[2],
+        images.shape[3],
+        pipeline.device,
+        pipeline.dtype,
+    )
+    if images_tokens.shape[1] != images_ids.shape[0]:
+        images_ids = pipeline._prepare_latent_image_ids(
+            images.shape[0],
+            images.shape[2] // 2,
+            images.shape[3] // 2,
+            pipeline.device,
+            pipeline.dtype,
+        )
+    return images_tokens, images_ids
+"""
 
 def prepare_text_input(pipeline: FluxPipeline, prompts, max_sequence_length=512):
     # Turn off warnings (CLIP overflow)

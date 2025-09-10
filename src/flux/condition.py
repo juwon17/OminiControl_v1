@@ -16,6 +16,8 @@ condition_dict = {
     "depth_pred": 8,
     "fill": 9,
     "sr": 10,
+    "cartoon": 11,
+    "cannybbox": 12,
 }
 
 
@@ -73,6 +75,8 @@ class Condition(object):
             return condition_image
         elif condition_type == "fill":
             return raw_img.convert("RGB")
+        elif condition_type == "cartoon":
+            return raw_img.convert("RGB")
         return self.condition
 
     @property
@@ -93,21 +97,9 @@ class Condition(object):
         """
         Encodes the condition into tokens, ids and type_id.
         """
-        if self.condition_type in [
-            "depth",
-            "canny",
-            "subject",
-            "coloring",
-            "deblurring",
-            "depth_pred",
-            "fill",
-            "sr",
-        ]:
-            tokens, ids = encode_images(pipe, self.condition)
-        else:
-            raise NotImplementedError(
-                f"Condition type {self.condition_type} not implemented"
-            )
+
+        tokens, ids = encode_images(pipe, self.condition)
+
         if self.position_delta is None and self.condition_type == "subject":
             self.position_delta = [0, -self.condition.size[0] // 16]
         if self.position_delta is not None:

@@ -13,6 +13,7 @@ except ImportError:
 
 from ..flux.condition import Condition
 from ..flux.generate import generate
+import glob
 
 
 class TrainingCallback(L.Callback):
@@ -35,7 +36,7 @@ class TrainingCallback(L.Callback):
         gradient_size = 0
         max_gradient_size = 0
         count = 0
-        for _, param in pl_module.named_parameters():
+        for name, param in pl_module.named_parameters():
             if param.grad is not None:
                 gradient_size += param.grad.norm(2).item()
                 max_gradient_size = max(max_gradient_size, param.grad.norm(2).item())
@@ -96,15 +97,19 @@ class TrainingCallback(L.Callback):
         file_name,
         condition_type="super_resolution",
     ):
-        # TODO: change this two variables to parameters
-        condition_size = trainer.training_config["dataset"]["condition_size"]
-        target_size = trainer.training_config["dataset"]["target_size"]
+        try:
+            target_width = trainer.training_config["dataset"]["target_width"]
+            target_height = trainer.training_config["dataset"]["target_height"]
+        except:
+            target_width = trainer.training_config["dataset"]["target_size"]
+            target_height = trainer.training_config["dataset"]["target_size"]
 
         generator = torch.Generator(device=pl_module.device)
         generator.manual_seed(42)
 
         test_list = []
 
+        """
         if condition_type == "subject":
             test_list.extend(
                 [
@@ -191,27 +196,48 @@ class TrainingCallback(L.Callback):
             test_list.append((condition_img, [0, -16], "A beautiful vase on a table."))
         else:
             raise NotImplementedError
+        """
+
+        img_name_list = []
+
+        # NOTE: if condition_type is not spatial control task, print a warning
+        if condition_type != "canny" and condition_type != "depth" and condition_type != "coloring" and condition_type != "deblurring" and condition_type != "fill":
+            print("Warning: Implemented only for spatial control tasks, but condition_type is "+ condition_type)
+
+        if pl_module.validation_path:
+            validation_imgs = glob.glob(os.path.join(pl_module.validation_path, "*.jpg")) + glob.glob(os.path.join(pl_module.validation_path, "*.png"))
+            for img_path in validation_imgs:
+                condition_img = Image.open(img_path).convert("RGB").resize((target_width, target_height))
+                if pl_module.validation_prompt:
+                    prompt = pl_module.validation_prompt
+                else:
+                    prompt_path = img_path.replace(".png", ".txt").replace(".jpg", ".txt")
+                    with open(prompt_path, "r") as f:
+                        prompt = f.read()
+                test_list.append((condition_img, [0, 0], prompt)) # ASSUME: position_delta is [0, 0] for spatial control tasks
+                img_name_list.append(os.path.basename(img_path))
+        else:
+            return
 
         if not os.path.exists(save_path):
             os.makedirs(save_path)
         for i, (condition_img, position_delta, prompt) in enumerate(test_list):
             condition = Condition(
                 condition_type=condition_type,
-                condition=condition_img.resize(
-                    (condition_size, condition_size)
-                ).convert("RGB"),
+                condition=condition_img,
                 position_delta=position_delta,
             )
             res = generate(
                 pl_module.flux_pipe,
                 prompt=prompt,
                 conditions=[condition],
-                height=target_size,
-                width=target_size,
+                height=target_height,
+                width=target_width,
                 generator=generator,
                 model_config=pl_module.model_config,
                 default_lora=True,
             )
             res.images[0].save(
-                os.path.join(save_path, f"{file_name}_{condition_type}_{i}.jpg")
+                # os.path.join(save_path, f"{file_name}_{condition_type}_{i}.jpg")
+                os.path.join(save_path, f"{file_name}_{img_name_list[i]}")
             )

@@ -1,5 +1,6 @@
 import lightning as L
 from diffusers.pipelines import FluxPipeline
+from diffusers.loaders import FluxLoraLoaderMixin
 import torch
 from peft import LoraConfig, get_peft_model_state_dict
 
@@ -8,7 +9,7 @@ import prodigyopt
 from ..flux.transformer import tranformer_forward
 from ..flux.condition import Condition
 from ..flux.pipeline_tools import encode_images, prepare_text_input
-
+import os
 
 class OminiModel(L.LightningModule):
     def __init__(
@@ -21,11 +22,19 @@ class OminiModel(L.LightningModule):
         model_config: dict = {},
         optimizer_config: dict = None,
         gradient_checkpointing: bool = False,
+        validation_path: str = None,
+        validation_prompt: str = None,
+        # guidance_scale: float = 1.0,
+        train_text_encoder: bool = False,
+        train_text_encoder_2: bool = False,
+        text_encoder_lora_config: dict = None,
+        text_encoder_2_lora_config: dict = None,
     ):
         # Initialize the LightningModule
         super().__init__()
         self.model_config = model_config
         self.optimizer_config = optimizer_config
+        # self.guidance_scale = guidance_scale
 
         # Load the Flux pipeline
         self.flux_pipe: FluxPipeline = (
@@ -35,44 +44,109 @@ class OminiModel(L.LightningModule):
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
 
-        # Freeze the Flux pipeline
-        self.flux_pipe.text_encoder.requires_grad_(False).eval()
-        self.flux_pipe.text_encoder_2.requires_grad_(False).eval()
+        self.text_encoder = self.flux_pipe.text_encoder
+        self.text_encoder_2 = self.flux_pipe.text_encoder_2
+
+        # FIXME: why requires_grad(True) (train mode is correct)? LoRA alone might be enough...
+        if train_text_encoder:
+            self.text_encoder.requires_grad_(True).train()
+            self.text_encoder.gradient_checkpointing = gradient_checkpointing
+            self.text_encoder_lora_list = self.init_text_encoder_lora(self.text_encoder, text_encoder_lora_config)
+        else:
+            self.text_encoder.requires_grad_(False).eval()
+            self.text_encoder_lora_list = []
+
+        if train_text_encoder_2:
+            self.text_encoder_2.requires_grad_(True).train()
+            self.text_encoder_2.gradient_checkpointing = gradient_checkpointing
+            self.text_encoder_2_lora_list = self.init_text_encoder_lora(self.text_encoder_2, text_encoder_2_lora_config)
+        else:
+            self.text_encoder_2.requires_grad_(False).eval()
+            self.text_encoder_2_lora_list = []
+
         self.flux_pipe.vae.requires_grad_(False).eval()
 
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
 
+        self.validation_path = validation_path
+        self.validation_prompt = validation_prompt
+        
         self.to(device).to(dtype)
 
     def init_lora(self, lora_path: str, lora_config: dict):
         assert lora_path or lora_config
         if lora_path:
-            # TODO: Implement this
-            raise NotImplementedError
+            state_dict, network_alphas = FluxLoraLoaderMixin.lora_state_dict(lora_path, return_alphas=True)
+            FluxLoraLoaderMixin.load_lora_into_transformer(state_dict, network_alphas, self.transformer, adapter_name="default")
+            # state dict에 있는 layer들을 lora_layers에 추가
+            # state_dict의 키에서 모듈 경로를 추출하여 해당 모듈의 파라미터들을 찾음
+            lora_layers = []
+            for layer_name in state_dict.keys():
+                try:
+                    # state_dict 키에서 모듈 경로 추출 (예: "transformer.blocks.0.attn1.to_q.lora_A.weight" -> "blocks.0.attn1.to_q")
+                    # .weight 부분을 제거하고 transformer. prefix도 제거
+                    module_path = '.'.join(layer_name.split('.')[:-1]).replace("transformer.", "")
+                    if module_path:
+                        module = self.transformer.get_submodule(module_path)
+                        lora_layers.extend(module.parameters())
+                except (AttributeError, KeyError) as e:
+                    # 모듈을 찾을 수 없는 경우 로그 출력
+                    print(f"Warning: Could not find module for layer {layer_name}: {e}")
+                    continue
         else:
             self.transformer.add_adapter(LoraConfig(**lora_config))
-            # TODO: Check if this is correct (p.requires_grad)
-            lora_layers = filter(
+            # TODO: check base model parameters are already set to non-trainable
+            print("Warning: check base model parameters are already set to non-trainable...")
+            # LoRA config로 추가된 후 trainable parameters를 찾아서 lora_layers에 추가
+            lora_layers = list(filter(
                 lambda p: p.requires_grad, self.transformer.parameters()
-            )
-        return list(lora_layers)
+            ))
+        return lora_layers
+    
+    def init_text_encoder_lora(self, text_encoder: torch.nn.Module, lora_config: dict):
+        assert lora_config
+        text_encoder.add_adapter(LoraConfig(**lora_config))
+        lora_layers = list(filter(
+            lambda p: p.requires_grad, text_encoder.parameters()
+        ))
+        return lora_layers
 
     def save_lora(self, path: str):
         FluxPipeline.save_lora_weights(
-            save_directory=path,
+            save_directory=os.path.join(path, "omini_lora"),
             transformer_lora_layers=get_peft_model_state_dict(self.transformer),
             safe_serialization=True,
         )
+        if len(self.text_encoder_lora_list) > 0:
+            FluxPipeline.save_lora_weights(
+                save_directory=os.path.join(path, "text_encoder_lora"),
+                text_encoder_lora_layers=get_peft_model_state_dict(self.flux_pipe.text_encoder),
+                safe_serialization=True,
+            )
+        if len(self.text_encoder_2_lora_list) > 0:
+            FluxPipeline.save_lora_weights(
+                save_directory=os.path.join(path, "text_encoder_2_lora"),
+                text_encoder_lora_layers=get_peft_model_state_dict(self.flux_pipe.text_encoder_2),
+                safe_serialization=True,
+            )
+        torch.save(self.optimizers().state_dict(), os.path.join(path, "optimizer.pth"))
 
     def configure_optimizers(self):
         # Freeze the transformer
         self.transformer.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
+        self.text_encoder_2.requires_grad_(False)
         opt_config = self.optimizer_config
 
         # Set the trainable parameters
         self.trainable_params = self.lora_layers
 
+        if len(self.text_encoder_lora_list) > 0:
+            self.trainable_params.extend(self.text_encoder_lora_list)
+        if len(self.text_encoder_2_lora_list) > 0:
+            self.trainable_params.extend(self.text_encoder_2_lora_list)
+        
         # Unfreeze trainable parameters
         for p in self.trainable_params:
             p.requires_grad_(True)
@@ -108,15 +182,23 @@ class OminiModel(L.LightningModule):
         prompts = batch["description"]
         position_delta = batch["position_delta"][0]
 
+        if len(self.text_encoder_lora_list) > 0: #FIXME: text_encoder_lora_list2 is not used
+            # Prepare text input
+            prompt_embeds, pooled_prompt_embeds, text_ids = prepare_text_input(
+                self.flux_pipe, prompts
+            )
+
+        else:
+            with torch.no_grad():
+                prompt_embeds, pooled_prompt_embeds, text_ids = prepare_text_input(
+                    self.flux_pipe, prompts
+                )
+
         # Prepare inputs
         with torch.no_grad():
             # Prepare image input
             x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
-            # Prepare text input
-            prompt_embeds, pooled_prompt_embeds, text_ids = prepare_text_input(
-                self.flux_pipe, prompts
-            )
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
@@ -148,6 +230,7 @@ class OminiModel(L.LightningModule):
                 if self.transformer.config.guidance_embeds
                 else None
             )
+            # ) * self.guidance_scale
 
         # Forward pass
         transformer_out = tranformer_forward(

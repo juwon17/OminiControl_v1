@@ -5,15 +5,11 @@ import yaml
 import os
 import time
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
-from .data import (
-    ImageConditionDataset,
-    Subject200KDateset,
-)
+from .data import CustomDataset
 from .model import OminiModel
 from .callbacks import TrainingCallback
-
 
 def get_rank():
     try:
@@ -46,6 +42,7 @@ def init_wandb(wandb_config, run_name):
 
 
 def main():
+
     # Initialize
     is_main_process, rank = get_rank() == 0, get_rank()
     torch.cuda.set_device(rank)
@@ -62,56 +59,19 @@ def main():
     if is_main_process:
         print("Config:", config)
 
-    # Initialize dataset and dataloader
-    if training_config["dataset"]["type"] == "subject":
-        dataset = load_dataset("Yuanshi/Subjects200K")
 
-        # Define filter function
-        def filter_func(item):
-            if not item.get("quality_assessment"):
-                return False
-            return all(
-                item["quality_assessment"].get(key, 0) >= 5
-                for key in ["compositeStructure", "objectConsistency", "imageQuality"]
-            )
+    dataset = CustomDataset(
+        image_folder=training_config["dataset"]["image_folder"],
+        prompt=training_config["dataset"]["prompt"],
+        condition_type=training_config["condition_type"],
+        drop_text_prob=training_config["dataset"]["drop_text_prob"],
+        drop_image_prob=training_config["dataset"]["drop_image_prob"],
+        prompt_folder=training_config["dataset"].get("prompt_folder", None),
+        target_width=training_config["dataset"]["target_width"],
+        target_height=training_config["dataset"]["target_height"],
+        condition_folder=training_config["dataset"].get("condition_folder", None),
+    )
 
-        # Filter dataset
-        if not os.path.exists("./cache/dataset"):
-            os.makedirs("./cache/dataset")
-        data_valid = dataset["train"].filter(
-            filter_func,
-            num_proc=16,
-            cache_file_name="./cache/dataset/data_valid.arrow",
-        )
-        dataset = Subject200KDateset(
-            data_valid,
-            condition_size=training_config["dataset"]["condition_size"],
-            target_size=training_config["dataset"]["target_size"],
-            image_size=training_config["dataset"]["image_size"],
-            padding=training_config["dataset"]["padding"],
-            condition_type=training_config["condition_type"],
-            drop_text_prob=training_config["dataset"]["drop_text_prob"],
-            drop_image_prob=training_config["dataset"]["drop_image_prob"],
-        )
-    elif training_config["dataset"]["type"] == "img":
-        # Load dataset text-to-image-2M
-        dataset = load_dataset(
-            "webdataset",
-            data_files={"train": training_config["dataset"]["urls"]},
-            split="train",
-            cache_dir="cache/t2i2m",
-            num_proc=32,
-        )
-        dataset = ImageConditionDataset(
-            dataset,
-            condition_size=training_config["dataset"]["condition_size"],
-            target_size=training_config["dataset"]["target_size"],
-            condition_type=training_config["condition_type"],
-            drop_text_prob=training_config["dataset"]["drop_text_prob"],
-            drop_image_prob=training_config["dataset"]["drop_image_prob"],
-        )
-    else:
-        raise NotImplementedError
 
     print("Dataset length:", len(dataset))
     train_loader = DataLoader(
@@ -124,12 +84,20 @@ def main():
     # Initialize model
     trainable_model = OminiModel(
         flux_pipe_id=config["flux_path"],
-        lora_config=training_config["lora_config"],
+        lora_path=training_config.get("lora_path", None),
+        lora_config=training_config.get("lora_config", None),
         device=f"cuda",
         dtype=getattr(torch, config["dtype"]),
         optimizer_config=training_config["optimizer"],
         model_config=config.get("model", {}),
         gradient_checkpointing=training_config.get("gradient_checkpointing", False),
+        validation_path=training_config.get("validation_path", None),
+        validation_prompt=training_config.get("validation_prompt", None),
+        # guidance_scale=training_config.get("guidance_scale", 1.0),
+        train_text_encoder=training_config.get("train_text_encoder", False),
+        train_text_encoder_2=training_config.get("train_text_encoder_2", False),
+        text_encoder_lora_config=training_config.get("text_encoder_lora_config", None),
+        text_encoder_2_lora_config=training_config.get("text_encoder_2_lora_config", None),
     )
 
     # Callbacks for logging and saving checkpoints

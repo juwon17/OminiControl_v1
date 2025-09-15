@@ -29,6 +29,7 @@ class OminiModel(L.LightningModule):
         train_text_encoder_2: bool = False,
         text_encoder_lora_config: dict = None,
         text_encoder_2_lora_config: dict = None,
+        loss_type: str = "mse",
     ):
         # Initialize the LightningModule
         super().__init__()
@@ -71,6 +72,8 @@ class OminiModel(L.LightningModule):
 
         self.validation_path = validation_path
         self.validation_prompt = validation_prompt
+
+        self.loss_type = loss_type
         
         self.to(device).to(dtype)
 
@@ -255,6 +258,12 @@ class OminiModel(L.LightningModule):
         pred = transformer_out[0]
 
         # Compute loss
-        loss = torch.nn.functional.mse_loss(pred, (x_1 - x_0), reduction="mean")
+        if self.loss_type == "mse":
+            loss = torch.nn.functional.mse_loss(pred, (x_1 - x_0), reduction="mean")
+        elif self.loss_type == "huber":
+            loss = torch.nn.functional.huber_loss(pred, (x_1 - x_0), reduction="mean", delta=1.0) # TODO: delta is not fixed
+        else:
+            raise NotImplementedError(f"Loss type {self.loss_type} is not implemented")
+
         self.last_t = t.mean().item()
         return loss
